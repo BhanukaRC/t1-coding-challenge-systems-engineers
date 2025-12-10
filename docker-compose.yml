@@ -1,53 +1,79 @@
+name: t1-challenge
+
 services:
   database:
-    container_name: t1-coding-challenge-database
-    image: mongo:4.4.3
+    container_name: t1-challenge-database
+    image: mongo:8.0.12
     ports:
       - "27017:27017"
-
-  zookeeper:
-    container_name: t1-coding-challenge-zookeeper
-    image: confluentinc/cp-zookeeper:latest
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-      - "2181:2181"
+    volumes:
+      - mongodb_data:/data/db
 
   kafka:
-    container_name: t1-coding-challenge-kafka
-    image: confluentinc/cp-kafka:latest
-    depends_on:
-      - zookeeper
+    container_name: t1-challenge-kafka
+    image: apache/kafka:4.0.0
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+
+      KAFKA_GROUP_COORDINATOR_TIMEOUT_MS: 30000
+      KAFKA_OFFSETS_COMMIT_TIMEOUT_MS: 30000
+      KAFKA_LOG_FLUSH_INTERVAL_MS: 10000
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   kafka-producer:
-    container_name: t1-coding-challenge-kafka-producer
+    container_name: t1-challenge-kafka-producer
     build: ./kafka-producer
+    volumes:
+      - ./kafka-producer:/app
+      - /app/node_modules
+      - /app/dist
     depends_on:
       - kafka
+    restart: on-failure
 
   frontend-service:
-    container_name: t1-coding-challenge-frontend-service
+    container_name: t1-challenge-frontend-service
     build: ./frontend-service
+    volumes:
+      - ./frontend-service:/app
+      - /app/node_modules
+      - /app/dist
     ports:
       - "3001:3001"
     depends_on:
       - kafka-producer
+    restart: on-failure
 
   calculation-service:
-    container_name: t1-coding-challenge-calculation-service
+    container_name: t1-challenge-calculation-service
     build: ./calculation-service
+    volumes:
+      - ./calculation-service:/app
+      - /app/node_modules
+      - /app/dist
     depends_on:
       - kafka-producer
       - database
+    restart: on-failure
 
   frontend:
-    container_name: t1-coding-challenge-frontend
+    container_name: t1-challenge-frontend
     build:
       context: ./frontend
       target: dev
@@ -59,3 +85,17 @@ services:
       - "3000:3000"
     depends_on:
       - frontend-service
+
+volumes:
+  mongodb_data:
+    name: t1-challenge-mongodb-data
+  kafka_data:
+    name: t1-challenge-kafka-data
+  kafka_producer:
+    name: t1-challenge-kafka-producer
+  frontend_service:
+    name: t1-challenge-frontend-service
+  calculation_service:
+    name: t1-challenge-calculation-service
+  frontend:
+    name: t1-challenge-frontend

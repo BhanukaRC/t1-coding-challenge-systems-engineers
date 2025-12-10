@@ -1,40 +1,61 @@
-import { Producer, ProducerGlobalConfig } from 'node-rdkafka';
+import { Kafka } from 'kafkajs';
 import { StreamProcessor } from './StreamProcessor';
 import { RawMarketMessage, RawTradeMessage } from './types';
 
 type RawMessage = RawMarketMessage | RawTradeMessage;
 
-const producerConfig: ProducerGlobalConfig = {
-    'metadata.broker.list': 'kafka:9092',
-    'dr_cb': true,  // Delivery report callback
-};
-
-const producer = new Producer(producerConfig);
-
-producer.on('event.error', (err) => {
-    console.error('Error from producer:', err);
+const kafka = new Kafka({
+    clientId: 'kafka-producer',
+    brokers: ['kafka:9092'],
+    retry: {
+        initialRetryTime: 100,
+        retries: 5,
+    },
+    connectionTimeout: 10000,
+    requestTimeout: 30000,
 });
 
-producer.on('ready', () => {
-    console.log('Kafka Producer is ready');
-    fetchStreamAndProduce()
-        .then(() => {
-            console.log('Stream processing completed');
-        })
-        .catch((error) => {
-            console.error('Stream processing failed:', error);
-        }
-        );
+const producer = kafka.producer();
+
+process.on('SIGTERM', async () => {
+    console.log('Received SIGTERM, shutting down gracefully...');
+    try {
+        await producer.disconnect();
+        console.log('Producer disconnected');
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during shutdown:', error);
+        process.exit(1);
+    }
 });
 
-function onMessage(message: RawMessage) {
-    producer.produce(
-        message.messageType,
-        null,
-        Buffer.from(JSON.stringify(message)),
-        null,
-        Date.now()
-    );
+process.on('SIGINT', async () => {
+    console.log('Received SIGINT, shutting down gracefully...');
+    try {
+        await producer.disconnect();
+        console.log('Producer disconnected');
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during shutdown:', error);
+        process.exit(1);
+    }
+});
+
+async function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function onMessage(message: RawMessage) {
+    await producer.send({
+        topic: message.messageType,
+        messages: [
+            {
+                key: message.messageType,
+                value: JSON.stringify(message),
+                timestamp: Date.now().toString(),
+            }
+        ],
+    });
 }
 
 async function fetchStreamAndProduce() {
@@ -55,14 +76,46 @@ async function fetchStreamAndProduce() {
     await streamProcessor.processStream(response.body);
 
     console.log('Streaming ended');
-    producer.disconnect();
-};
+    await producer.disconnect();
+}
 
-producer.connect({}, (err, metaData) => {
-    if (err) {
-        console.error('Error connecting to Kafka:', err);
-        return;
+async function main() {
+    const maxRetries = 5;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+        try {
+            // Wait for Kafka to be ready
+            console.log('Waiting for Kafka to be ready...');
+            await sleep(10000);
+
+            await producer.connect();
+            console.log('Kafka Producer is ready');
+
+            await fetchStreamAndProduce();
+            console.log('Stream processing completed');
+            break;
+        } catch (error) {
+            attempt++;
+            console.error(`Error connecting to Kafka (attempt ${attempt}/${maxRetries}):`, error);
+
+            // Disconnect producer before retrying
+            try {
+                await producer.disconnect();
+            } catch (e) {
+                // Ignore disconnect errors
+            }
+
+            if (attempt < maxRetries) {
+                const waitTime = Math.min(2000 * Math.pow(2, attempt), 30000);
+                console.log(`Retrying in ${waitTime}ms...`);
+                await sleep(waitTime);
+            } else {
+                console.error('Max retries reached, giving up');
+                process.exit(1);
+            }
+        }
     }
+}
 
-    console.log('Connected to Kafka:', metaData);
-});
+main();
