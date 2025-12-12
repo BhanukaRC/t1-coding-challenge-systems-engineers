@@ -46,11 +46,18 @@ async function sleep(ms: number) {
 }
 
 async function onMessage(message: RawMessage) {
+    const timestamp = message.messageType === 'market'
+        ? new Date(message.startTime).getTime()
+        : new Date(message.time).getTime();
+
+    const timeBucket = Math.floor(timestamp / (5 * 1000));
+    const partitionKey = `${message.messageType}-${timeBucket}`;
+
     await producer.send({
         topic: message.messageType,
         messages: [
             {
-                key: message.messageType,
+                key: partitionKey,
                 value: JSON.stringify(message),
                 timestamp: Date.now().toString(),
             }
