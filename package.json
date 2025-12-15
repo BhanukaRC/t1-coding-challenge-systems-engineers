@@ -5,6 +5,7 @@
   "scripts": {
     "start": "docker compose up --scale calculation-service=2",
     "kafka:setup": "./kafka-setup.sh",
+    "pre:test": "npm install --prefix trade-memory-service && npm install --prefix calculation-service && npm install --prefix trade-persistence-service && npm install --prefix frontend-service",
     "test": "npm run test --prefix trade-memory-service && npm run test --prefix calculation-service",
     "test:memory": "npm run test --prefix trade-memory-service",
     "test:calculation": "npm run test --prefix calculation-service",
