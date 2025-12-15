@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package trades;
+
+service TradesService {
+  rpc GetTradesForPeriod(GetTradesRequest) returns (GetTradesResponse);
+}
+
+message GetTradesRequest {
+  string startTime = 1; // ISO string
+  string endTime = 2;   // ISO string
+}
+
+message Trade {
+  string tradeType = 1; // "BUY" or "SELL"
+  string volume = 2;     // string for precision
+  string time = 3;       // ISO string
+}
+
+message GetTradesResponse {
+  repeated Trade trades = 1;
+}

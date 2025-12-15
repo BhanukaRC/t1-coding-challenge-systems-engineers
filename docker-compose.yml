@@ -1,0 +1,161 @@
+name: t1-challenge
+
+services:
+  database:
+    container_name: t1-challenge-database
+    image: mongo:8.0.12
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    command: >
+      bash -c "
+      mongod --replSet rs0 --bind_ip_all &
+      MONGO_PID=$$!
+      sleep 15 &&
+      until mongosh --eval 'db.adminCommand(\"ping\")' --quiet > /dev/null 2>&1; do
+        echo 'Waiting for MongoDB to be ready...'
+        sleep 2
+      done &&
+      mongosh --eval '
+        try {
+          rs.status();
+        } catch (e) {
+          rs.initiate({
+            _id: \"rs0\",
+            members: [{ _id: 0, host: \"database:27017\" }]
+          });
+        }
+      ' &&
+      wait $$MONGO_PID
+      "
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  kafka:
+    container_name: t1-challenge-kafka
+    image: apache/kafka:4.0.0
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+
+      KAFKA_GROUP_COORDINATOR_TIMEOUT_MS: 30000
+      KAFKA_OFFSETS_COMMIT_TIMEOUT_MS: 30000
+      KAFKA_LOG_FLUSH_INTERVAL_MS: 10000
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  kafka-producer:
+    container_name: t1-challenge-kafka-producer
+    build: ./kafka-producer
+    volumes:
+      - ./kafka-producer:/app
+      - /app/node_modules
+      - /app/dist
+    depends_on:
+      - kafka
+    restart: on-failure
+
+  trade-memory-service:
+    build: ./trade-memory-service
+    volumes:
+      - ./trade-memory-service:/app
+      - /app/node_modules
+      - /app/dist
+    ports:
+      - "50051:50051"
+    depends_on:
+      - kafka
+      - trade-persistence-service
+    restart: on-failure
+    environment:
+      - PERSISTENCE_SERVICE_HOST=trade-persistence-service
+      - PERSISTENCE_SERVICE_PORT=50052
+
+  trade-persistence-service:
+    build: ./trade-persistence-service
+    volumes:
+      - ./trade-persistence-service:/app
+      - /app/node_modules
+      - /app/dist
+    ports:
+      - "50052:50052"
+    depends_on:
+      - kafka
+      - database
+    restart: on-failure
+
+  frontend-service:
+    container_name: t1-challenge-frontend-service
+    build: ./frontend-service
+    volumes:
+      - ./frontend-service:/app
+      - /app/node_modules
+      - /app/dist
+    ports:
+      - "3001:3001"
+    depends_on:
+      - kafka-producer
+      - database
+    restart: on-failure
+
+  calculation-service:
+    build: ./calculation-service
+    volumes:
+      - ./calculation-service:/app
+      - /app/node_modules
+      - /app/dist
+    depends_on:
+      - kafka-producer
+      - database
+      - trade-memory-service
+    restart: on-failure
+    environment:
+      - TRADES_SERVICE_HOST=trade-memory-service
+      - TRADES_SERVICE_PORT=50051
+
+  frontend:
+    container_name: t1-challenge-frontend
+    build:
+      context: ./frontend
+      target: dev
+      dockerfile: Dockerfile
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      - frontend-service
+
+volumes:
+  mongodb_data:
+    name: t1-challenge-mongodb-data
+  kafka_data:
+    name: t1-challenge-kafka-data
+  kafka_producer:
+    name: t1-challenge-kafka-producer
+  frontend_service:
+    name: t1-challenge-frontend-service
+  calculation_service:
+    name: t1-challenge-calculation-service
+  frontend:
+    name: t1-challenge-frontend

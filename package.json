@@ -1,0 +1,16 @@
+{
+  "name": "t1-coding-challenge",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "docker compose up --scale calculation-service=2",
+    "kafka:setup": "./kafka-setup.sh",
+    "test": "npm run test --prefix trade-memory-service && npm run test --prefix calculation-service",
+    "test:memory": "npm run test --prefix trade-memory-service",
+    "test:calculation": "npm run test --prefix calculation-service",
+    "test:trades": "npm run test --prefix trades-service",
+    "lag:trades-memory": "docker exec t1-challenge-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group trade-memory-service-group --describe",
+    "lag:trades-persistence": "docker exec t1-challenge-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group trade-persistence-service-group --describe",
+    "lag:calculation": "docker exec t1-challenge-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group calculation-service-group --describe"
+  }
+}
