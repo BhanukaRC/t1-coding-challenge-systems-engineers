@@ -24,6 +24,7 @@ export async function isMarketProcessed(startTime: Date, endTime: Date): Promise
   }
   
   // Not in buffer - check if market exists in database
+  // Might be an overkill but ensures idempotency
   const markets = getMarketsCollection();
   const existingMarket = await markets.findOne({
     startTime,
