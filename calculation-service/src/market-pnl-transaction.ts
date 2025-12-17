@@ -18,9 +18,7 @@ export async function writeMarketAndPnL(
   try {
     await session.withTransaction(async () => {
       const [marketResult, pnlResult] = await Promise.all([
-        // Insert market (will fail with 11000 if duplicate, handled below)
         markets.insertOne(marketDoc, { session }),
-        // Insert PnL (will fail with 11000 if duplicate, handled below)
         pnlsCollection.insertOne(pnlDoc, { session })
       ]);
 
@@ -28,9 +26,6 @@ export async function writeMarketAndPnL(
       console.log(`PnL inserted to database with id: ${pnlResult.insertedId}`);
     });
 
-    // Add to in-memory buffer after successful transaction
-    addMarketToBuffer(marketDoc);
-    
     return false; // Successfully processed
   } catch (transactionError: unknown) {
     if (isMongoDbError(transactionError) && transactionError.code === MONGODB_DUPLICATE_KEY_ERROR_CODE) {

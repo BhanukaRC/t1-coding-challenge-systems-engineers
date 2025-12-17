@@ -27,6 +27,37 @@ export function addTradeToBatch(trade: TradeDocument): void {
   }
 }
 
+async function commitOffsetsForProcessedTrades(
+  tradesToFlush: TradeDocument[],
+): Promise<boolean> {
+  if (!kafkaConsumer || highestOffsetByPartition.size === 0) {
+    return true; 
+  }
+
+  const offsetsToCommit: Array<{ topic: string; partition: number; offset: string }> = [];
+  
+  for (const [partition, highestOffset] of Array.from(highestOffsetByPartition.entries())) {
+    offsetsToCommit.push({
+      topic: 'trades',
+      partition,
+      offset: (BigInt(highestOffset) + BigInt(1)).toString(),
+    });
+  }
+
+  try {
+    await kafkaConsumer.commitOffsets(offsetsToCommit);
+    console.log(`Committed offsets for ${offsetsToCommit.length} partition(s)`);
+
+    highestOffsetByPartition.clear();
+    return true;
+  } catch (error) {
+    console.error('Error committing offsets:', error);
+    // Re-add trades back to pending for retry
+    pendingTrades.push(...tradesToFlush);
+    return false;
+  }
+}
+
 // Flush pending trades to database and commit offsets
 export async function flushBatchToDB(): Promise<void> {
   if (pendingTrades.length === 0) {
@@ -69,30 +100,7 @@ export async function flushBatchToDB(): Promise<void> {
     // Errors are unlikely and therefore focusing on performance and reliability over strict correctness.
 
     // Commit offsets - loose approach: commit highest offset per partition
-    if (kafkaConsumer && highestOffsetByPartition.size > 0) {
-      const offsetsToCommit: Array<{ topic: string; partition: number; offset: string }> = [];
-      
-      for (const [partition, highestOffset] of Array.from(highestOffsetByPartition.entries())) {
-        // Commit offset = highestOffset + 1 (next offset to read)
-        offsetsToCommit.push({
-          topic: 'trades',
-          partition,
-          offset: (BigInt(highestOffset) + BigInt(1)).toString(),
-        });
-      }
-
-      try {
-        await kafkaConsumer.commitOffsets(offsetsToCommit);
-        console.log(`Committed offsets for ${offsetsToCommit.length} partition(s) (highest offsets)`);
-        
-        // Clear tracked offsets after successful commit
-        highestOffsetByPartition.clear();
-      } catch (error) {
-        console.error('Error committing offsets:', error);
-        // Re-add trades back to pending for retry
-        pendingTrades.push(...tradesToFlush);
-      }
-    }
+    await commitOffsetsForProcessedTrades(tradesToFlush);
   } catch (error) {
     // Handle bulk write errors - some operations may have succeeded
     if (isMongoBulkWriteError(error)) {
@@ -107,29 +115,11 @@ export async function flushBatchToDB(): Promise<void> {
       // If all failed, don't commit offsets - re-add all for retry
       if (successfullyProcessed > 0) {
         // Some succeeded - commit offsets for successfully processed trades
-        if (kafkaConsumer && highestOffsetByPartition.size > 0) {
-          const offsetsToCommit: Array<{ topic: string; partition: number; offset: string }> = [];
-          
-          for (const [partition, highestOffset] of Array.from(highestOffsetByPartition.entries())) {
-            offsetsToCommit.push({
-              topic: 'trades',
-              partition,
-              offset: (BigInt(highestOffset) + BigInt(1)).toString(),
-            });
-          }
-
-          try {
-            await kafkaConsumer.commitOffsets(offsetsToCommit);
-            console.log(`Committed offsets for ${offsetsToCommit.length} partition(s) (partial success - ${successfullyProcessed} trades processed)`);
-            highestOffsetByPartition.clear();
-          } catch (commitError) {
-            console.error('Error committing offsets after partial failure:', commitError);
-            // Re-add all trades for retry since offset commit failed
-            pendingTrades.push(...tradesToFlush);
-            return;
-          }
+        const commitSucceeded = await commitOffsetsForProcessedTrades(tradesToFlush);
+        
+        if (!commitSucceeded) {
+          return; 
         }
-        // Failed trades will be retried in next batch (they're already cleared from pending)
       } else {
         // All failed - don't commit offsets, re-add all trades for retry
         console.error('All trades failed to write - not committing offsets');

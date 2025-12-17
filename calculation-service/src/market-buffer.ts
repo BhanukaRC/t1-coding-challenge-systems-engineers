@@ -78,6 +78,8 @@ export async function processMarketMessage(
   };
 
   try {
+
+    // wrap to another function and move to grpc-client.ts
     const trades = await retryWithBackoff(() =>
       getTradesForPeriod(startTime, endTime)
     );
@@ -106,6 +108,9 @@ export async function processMarketMessage(
       return true; // Already processed
     }
 
+    // Add to in-memory buffer after successful transaction
+    addMarketToBuffer(marketDoc);
+    
     console.log(
       `PnL calculated: ${pnlResult.pnl.toString()} € (Buy: ${pnlResult.totalBuyVolume.toString()} MWh, Sell: ${pnlResult.totalSellVolume.toString()} MWh)`
     );

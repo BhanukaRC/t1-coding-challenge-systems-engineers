@@ -35,11 +35,16 @@ function getPersistenceClient(): any {
 // Query trades from persistence service via gRPC
 async function queryPersistenceService(startTime: Date, endTime: Date): Promise<any[]> {
   return new Promise((resolve, reject) => {
+    // no longer than WAIT_TIMEOUT_MS waiting for the response
+    const deadline = new Date(Date.now() + WAIT_TIMEOUT_MS);
     const client = getPersistenceClient();
     client.getTradesForPeriod(
       {
         startTime: startTime.toISOString(),
         endTime: endTime.toISOString(),
+      },
+      {
+        deadline: deadline.getTime(),
       },
       (error: grpc.ServiceError | null, response: any) => {
         if (error) {
@@ -51,6 +56,39 @@ async function queryPersistenceService(startTime: Date, endTime: Date): Promise<
       }
     );
   });
+}
+
+async function waitForTradeAfterEndTimeOrTimeout(
+  end: Date,
+  initialLastTradeTimeValue: number | null,
+  timeoutMs: number,
+  intervalMs = 100
+): Promise<void> {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const currentLastTradeTime = getLastTradeTime();
+
+    if (currentLastTradeTime) {
+      const currentValue = currentLastTradeTime.getTime();
+
+      const isNewTrade =
+        initialLastTradeTimeValue === null ||
+        currentValue !== initialLastTradeTimeValue;
+
+      if (isNewTrade && currentLastTradeTime > end) {
+        console.log(
+          `Found trade after period end (${currentLastTradeTime.toISOString()} > ${end.toISOString()})`
+        );
+        return;
+      }
+    }
+
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  console.log("Wait timeout reached");
+  return;
 }
 
 // Main query function - tries memory first, falls back to persistence service
@@ -68,8 +106,6 @@ export async function getTradesForPeriod(
     // Update queried range to track what has been queried (for out-of-order detection)
     updateQueriedRange(start, end);
 
-    // Wait condition: wait for message after endTime OR timeout
-    const waitStartTime = Date.now();
     const initialLastTradeTime = getLastTradeTime();
     const initialLastTradeTimeValue = initialLastTradeTime ? initialLastTradeTime.getTime() : null;
     
@@ -79,46 +115,15 @@ export async function getTradesForPeriod(
     } else {
       console.log(`Waiting for trade after period end or ${WAIT_TIMEOUT_MS}ms timeout...`);
     }
-    
-    const checkCondition = (): boolean => {
-      // Check if a NEW trade arrived that's after the period end
-      const currentLastTradeTime = getLastTradeTime();
-      if (currentLastTradeTime) {
-        const currentLastTradeTimeValue = currentLastTradeTime.getTime();
-        // New trade arrived (time changed from when request started)
-        if (initialLastTradeTimeValue === null || currentLastTradeTimeValue !== initialLastTradeTimeValue) {
-          // If we've seen a trade after the period end, the period is likely complete
-          if (currentLastTradeTime > end) {
-            console.log(`Found trade after period end (${currentLastTradeTime.toISOString()} > ${end.toISOString()}), sending response`);
-            return false; // Stop waiting
-          }
-        }
-      }
-
-      // Check timeout
-      if (Date.now() - waitStartTime >= WAIT_TIMEOUT_MS) {
-        console.log('Wait timeout reached, sending response');
-        return false; // Stop waiting
-      }
-
-      return true; // Continue waiting
-    };
-
-    // Wait loop
-    if (!initialLastTradeTime || initialLastTradeTime <= end) {
-      while (checkCondition()) {
-        await new Promise(resolve => setTimeout(resolve, 100)); // Check every 100ms
-      }
-    }
 
     // Check if we have trades in memory for this range
     const hasInMemory = hasTradesInRange(start, end);
-
+    
     if (hasInMemory) {
       // Query from memory buffer
+      await waitForTradeAfterEndTimeOrTimeout(end, initialLastTradeTimeValue, WAIT_TIMEOUT_MS);
       const trades = getTradesFromBuffer(start, end);
       console.log(`Returning ${trades.length} trades from memory for period ${start.toISOString()} - ${end.toISOString()}`);
-      
       callback(null, {
         trades: trades.map(t => ({
           tradeType: t.tradeType,
@@ -131,6 +136,8 @@ export async function getTradesForPeriod(
       console.log(`Data not in memory, querying persistence service...`);
       try {
         const trades = await queryPersistenceService(start, end);
+        // no need to wait for timeout because it is very likely a trade comes now for this old period
+        // if we want to be even more safe, we can wait and then check the in memory buffer for trades in this period. But that also does not 100% gurantee
         console.log(`Returning ${trades.length} trades from persistence service for period ${start.toISOString()} - ${end.toISOString()}`);
         
         callback(null, {

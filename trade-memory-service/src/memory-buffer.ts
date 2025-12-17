@@ -1,10 +1,11 @@
+import { Deque } from '@datastructures-js/deque';
 import { RawTradeMessage, TradeDocument } from './types.js';
 
 export const MEMORY_RETENTION_MS = parseInt(process.env.MEMORY_RETENTION_MS || '10000');
 export const QUERIED_RANGE_RETENTION_MS = parseInt(process.env.QUERIED_RANGE_RETENTION_MS || '60000'); // 60 seconds
 
-// In-memory buffer for trades (unsorted for O(1) inserts, queries use O(n) filter)
-const tradeBuffer: TradeDocument[] = [];
+// In-memory buffer for trades (deque: old trades at front, new trades at back)
+const tradeBuffer = new Deque<TradeDocument>();
 
 // Track last trade time for wait condition
 let lastTradeTime: Date | null = null;
@@ -15,14 +16,14 @@ let queriedRangeEnd: Date | null = null;
 
 // Get trades from buffer for a time range
 export function getTradesFromBuffer(startTime: Date, endTime: Date): TradeDocument[] {
-  return tradeBuffer.filter(
-    (trade) => trade.time >= startTime && trade.time <= endTime
+  return tradeBuffer.toArray().filter(
+    (trade: TradeDocument) => trade.time >= startTime && trade.time <= endTime
   );
 }
 
 // Add trade to buffer
 export function addTradeToBuffer(trade: TradeDocument): void {
-  tradeBuffer.push(trade);
+  tradeBuffer.pushBack(trade); // Add to back (new trades)
   // Update last trade time
   if (!lastTradeTime || trade.time > lastTradeTime) {
     lastTradeTime = trade.time;
@@ -35,34 +36,42 @@ export function getLastTradeTime(): Date | null {
 }
 
 // Remove old trades from buffer (older than MEMORY_RETENTION_MS)
+// Iterates from beginning, stops as soon as we find a trade with time > cutoffTime
 export function removeOldTrades(): void {
   const now = new Date();
   const cutoffTime = new Date(now.getTime() - MEMORY_RETENTION_MS);
-  
-  // Filter out old trades
-  const initialLength = tradeBuffer.length;
-  for (let i = tradeBuffer.length - 1; i >= 0; i--) {
-    const trade = tradeBuffer[i];
-    if (trade && trade.time < cutoffTime) {
-      tradeBuffer.splice(i, 1);
+  const initialLength = tradeBuffer.size();
+
+  // Remove from front until we find a trade that's NOT old
+  while (tradeBuffer.size() > 0) {
+    const trade = tradeBuffer.front();
+    if (!trade) {
+      break;
+    }
+    
+    if (trade.time < cutoffTime) {
+      tradeBuffer.popFront(); 
+    } else {
+      // Found a trade with time >= cutoffTime, all subsequent trades are also new
+      // (assuming trades arrive roughly in chronological order)
+      break;
     }
   }
   
-  const removed = initialLength - tradeBuffer.length;
-  if (removed > 0) {
-    console.log(`Removed ${removed} old trades from memory buffer (kept ${tradeBuffer.length} recent trades)`);
+  if (initialLength > tradeBuffer.size()) {
+    console.log(`Removed ${initialLength - tradeBuffer.size()} old trades from memory buffer (kept ${tradeBuffer.size()} recent trades)`);
   }
 }
 
 // Get all trades in buffer (for debugging)
 export function getAllTradesFromBuffer(): TradeDocument[] {
-  return [...tradeBuffer];
+  return tradeBuffer.toArray();
 }
 
 // Check if buffer has trades for a time range
 export function hasTradesInRange(startTime: Date, endTime: Date): boolean {
-  return tradeBuffer.some(
-    (trade) => trade.time >= startTime && trade.time <= endTime
+  return tradeBuffer.toArray().some(
+    (trade: TradeDocument) => trade.time >= startTime && trade.time <= endTime
   );
 }
 
@@ -122,7 +131,7 @@ export function resetQueriedRange(): void {
 
 // Reset state (for testing)
 export function resetState(): void {
-  tradeBuffer.length = 0;
+  tradeBuffer.clear();
   lastTradeTime = null;
   resetQueriedRange();
 }
