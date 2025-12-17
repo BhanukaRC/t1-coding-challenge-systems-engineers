@@ -256,7 +256,6 @@ describe('range-query', () => {
         });
 
         // Verify callback is NOT called immediately
-        await Promise.resolve();
         expect(mockCallback).not.toHaveBeenCalled();
 
         // Advance past the timeout
@@ -266,10 +265,6 @@ describe('range-query', () => {
         // Wait for the query to complete
         await queryPromise;
         
-        // Flush async operations
-        await Promise.resolve();
-        await Promise.resolve();
-
         // After timeout, callback should be called
         expect(mockCallback).toHaveBeenCalled();
       } finally {

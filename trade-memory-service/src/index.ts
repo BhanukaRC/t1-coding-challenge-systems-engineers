@@ -26,16 +26,38 @@ const consumer: Consumer = kafka.consumer({
   },
 });
 
+let cleanupInterval: NodeJS.Timeout | null = null;
+
+function startCleanupInterval(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+
+  cleanupInterval = setInterval(() => {
+    removeOldTrades();
+  }, 10000);
+}
+
+function stopCleanupInterval(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+}
+
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('Received SIGTERM, shutting down gracefully...');
   await shutdown();
+  stopCleanupInterval();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('Received SIGINT, shutting down gracefully...');
   await shutdown();
+  stopCleanupInterval();
   process.exit(0);
 });
 
@@ -59,21 +81,16 @@ async function runConsumer(): Promise<void> {
       console.log('Waiting for Kafka to be ready...');
       await new Promise(resolve => setTimeout(resolve, 10000));
 
+      stopCleanupInterval();
+
       await consumer.connect();
       console.log('Connected to Kafka');
 
       await consumer.subscribe({ topics: ['trades'], fromBeginning: false });
       console.log('Subscribed to trades topic');
 
-      // Start periodic cleanup of old trades
-      const cleanupInterval = setInterval(() => {
-        removeOldTrades();
-      }, 5000); // Clean up every 5 seconds
-
-      // Cleanup on shutdown
-      process.on('SIGTERM', () => clearInterval(cleanupInterval));
-      process.on('SIGINT', () => clearInterval(cleanupInterval));
-
+      startCleanupInterval();
+      
       await consumer.run({
         autoCommit: true, // Simple auto-commit - no manual offset management
         autoCommitInterval: 5000, // Commit every 5 seconds
@@ -120,10 +137,8 @@ async function runConsumer(): Promise<void> {
         },
       });
 
-      // Keep the process alive - consumer.run() runs in the background
-      await new Promise(() => {}); // Never resolves
-      
-      break; // Should never reach here
+      console.log('Consumer started successfully');
+      break;
     } catch (error) {
       attempt++;
       console.error(
@@ -133,6 +148,7 @@ async function runConsumer(): Promise<void> {
 
       try {
         await consumer.disconnect();
+        stopCleanupInterval();
       } catch (e) {
         // Ignore disconnect errors
       }

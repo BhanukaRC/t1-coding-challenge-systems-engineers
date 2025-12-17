@@ -65,6 +65,9 @@ async function runConsumer(): Promise<void> {
       console.log('Waiting for Kafka to be ready...');
       await new Promise(resolve => setTimeout(resolve, 10000));
 
+      // Ensure clean state before starting
+      stopBatchTimer();
+      
       await Promise.all([connectToDatabase(), consumer.connect()]);
 
       setKafkaConsumer(consumer);
@@ -109,10 +112,8 @@ async function runConsumer(): Promise<void> {
         },
       });
 
-      // Keep the process alive - consumer.run() runs in the background
-      await new Promise(() => {}); // Never resolves
-      
-      break; // Should never reach here
+      console.log('Consumer started successfully');
+      break;
     } catch (error) {
       attempt++;
       console.error(
@@ -121,8 +122,9 @@ async function runConsumer(): Promise<void> {
       );
 
       try {
-        await consumer.disconnect();
-        await closeDatabase();
+        stopBatchTimer(); 
+        
+        await Promise.allSettled([consumer.disconnect(), closeDatabase()]);
       } catch (e) {
         // Ignore disconnect errors
       }

@@ -3,6 +3,10 @@ import { connectToDatabase, closeDatabase } from './db.js';
 import { RawMarketMessage, isParsedRawMarketMessage } from './types.js';
 import { createGrpcClient, closeGrpcClient } from './grpc-client.js';
 import { processMarketMessage } from './market-buffer.js';
+import { setKafkaConsumer, initPartitionTracking, commitOffsetsInOrder, 
+  checkOffsetIsCompleted, checkOffsetIsInFlight, addOffsetToInFlight,
+  removeOffsetFromInFlight, 
+  addOffsetToCompleted} from './offset-handler.js';
 
 const kafka = new Kafka({
   clientId: 'calculation-service',
@@ -62,79 +66,14 @@ async function runConsumer(): Promise<void> {
       createGrpcClient();
       
       await Promise.all([connectToDatabase(), consumer.connect()]);
+      setKafkaConsumer(consumer);
+
       console.log('Connected to Kafka');
       
       await consumer.subscribe({ topics: ['market'], fromBeginning: false });
 
-      const inFlightOffsets = new Map<number, Set<string>>(); // partition -> Set of offsets being processed
-      const completedOffsets = new Map<number, Set<string>>(); // partition -> Set of offsets completed (ready to commit)
-      const lastCommittedOffset = new Map<number, string>(); // partition -> last committed offset
-
-      function initPartitionTracking(partition: number): void {
-        if (!inFlightOffsets.has(partition)) {
-          inFlightOffsets.set(partition, new Set());
-          completedOffsets.set(partition, new Set());
-        }
-      }
-
-      async function commitOffsetsInOrder(partition: number): Promise<void> {
-        const completed = completedOffsets.get(partition);
-        const lastCommitted = lastCommittedOffset.get(partition);
-        
-        if (!completed || completed.size === 0) {
-          return;
-        }
-
-        let nextToCommit: string | null = null;
-        if (!lastCommitted) {
-          const sorted = Array.from(completed).sort((a, b) => {
-            const aBig = BigInt(a);
-            const bBig = BigInt(b);
-            return aBig < bBig ? -1 : aBig > bBig ? 1 : 0;
-          });
-          nextToCommit = sorted[0]!; 
-        } else {
-          const expectedNext = (BigInt(lastCommitted) + BigInt(1)).toString();
-          if (completed.has(expectedNext)) {
-            nextToCommit = expectedNext;
-          }
-        }
-
-        // Commit all consecutive offsets starting from nextToCommit
-        // Even though we commit one offset at a time, this is not a concern since load per partition is manageable.
-        while (nextToCommit) {
-          const offsetToCommit = nextToCommit;
-          
-          try {
-            await consumer.commitOffsets([
-              {
-                topic: 'market',
-                partition,
-                offset: (BigInt(offsetToCommit) + BigInt(1)).toString(),
-              },
-            ]);
-            
-            // Only update data structures after successful commit
-            completed.delete(offsetToCommit);
-            lastCommittedOffset.set(partition, offsetToCommit);
-            console.log(`[Partition ${partition}] Committed offset ${offsetToCommit}`);
-
-            // Check if next offset is ready to commit
-            const nextExpected = (BigInt(offsetToCommit) + BigInt(1)).toString();
-            if (completed.has(nextExpected)) {
-              nextToCommit = nextExpected;
-            } else {
-              nextToCommit = null;
-            }
-          } catch (error) {
-            console.error(`[Partition ${partition}] Failed to commit offset ${offsetToCommit}:`, error);
-            break;
-          }
-        }
-      }
-
       // Start consumer - it should run indefinitely
-      consumer.run({
+      await consumer.run({
         autoCommit: false, // Manual commit after successful processing
         eachMessage: async ({ topic, partition, message }) => {
           if (!message.value) {
@@ -155,26 +94,24 @@ async function runConsumer(): Promise<void> {
             initPartitionTracking(partition);
               
             const currentOffset = message.offset;
-            const inFlight = inFlightOffsets.get(partition)!;
               
             // Check if this offset is already being processed
-            if (inFlight.has(currentOffset)) {
-              console.log(`[Partition ${partition}] Offset ${currentOffset} already in-flight, skipping duplicate`);
+            if (checkOffsetIsInFlight(partition, currentOffset) || checkOffsetIsCompleted(partition, currentOffset)) {
+              console.log(`[Partition ${partition}] Offset ${currentOffset} already in-flight or completed, skipping duplicate`);
               return;
             }
 
             // Add to in-flight
-            inFlight.add(currentOffset);
-            console.log(`[Partition ${partition}] Processing message offset ${currentOffset} (in-flight: ${Array.from(inFlight).join(', ')})`);
+            addOffsetToInFlight(partition, currentOffset);
+            console.log(`[Partition ${partition}] Processing message offset ${currentOffset} (in-flight)`);
 
             processMarketMessage(
               parsedMessage,
               partition,
               currentOffset
             ).then((skipped) => {
-              inFlight.delete(currentOffset);
-              const completed = completedOffsets.get(partition)!;
-              completed.add(currentOffset);
+              removeOffsetFromInFlight(partition, currentOffset);
+              addOffsetToCompleted(partition, currentOffset);
                 
               if (skipped) {
                 console.log(`[Partition ${partition}] Offset ${currentOffset} completed (idempotency skip)`);
@@ -187,11 +124,12 @@ async function runConsumer(): Promise<void> {
                 console.error(`[Partition ${partition}] Error committing offsets:`, error);
               });
             }).catch((error) => {
-              inFlight.delete(currentOffset);
+              removeOffsetFromInFlight(partition, currentOffset);
               console.error(
                 `[Partition ${partition}] Error processing offset ${currentOffset}:`,
                 error
               );
+              throw error;
             });
           } catch (error) {
             console.error(
@@ -202,11 +140,9 @@ async function runConsumer(): Promise<void> {
         },
       });
 
-      // Keep the process alive - consumer.run() runs in the background
-      // We'll wait indefinitely to keep the service running
-      await new Promise(() => {}); // Never resolves
+      console.log('Consumer started successfully');
       
-      break; // Should never reach here
+      break;
     } catch (error) {
       attempt++;
       console.error(
@@ -215,8 +151,7 @@ async function runConsumer(): Promise<void> {
       );
 
       try {
-        await consumer.disconnect();
-        await closeDatabase();
+        await Promise.allSettled([consumer.disconnect(), closeDatabase()]);
       } catch (e) {
         // Ignore disconnect errors
       }
@@ -239,10 +174,6 @@ async function main(): Promise<void> {
     console.log('Calculation service starting...');
     
     await runConsumer();
-    
-    // If we reach here, runConsumer completed (shouldn't happen)
-    console.error('runConsumer() completed unexpectedly, exiting...');
-    process.exit(1);
   } catch (error) {
     console.error('Fatal error in main:', error);
     if (error instanceof Error) {
